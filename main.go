@@ -8,11 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
-	"path/filepath"
-    "go.mau.fi/whatsmeow/store/sqlstore"
-    waLog "go.mau.fi/whatsmeow/util/log"
+
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/gorilla/mux"
 	"github.com/patrickmn/go-cache"
@@ -34,47 +35,65 @@ var (
 	colorOutput = flag.Bool("color", false, "Enable colored output for console logs")
 	sslcert     = flag.String("sslcertificate", "", "SSL Certificate File")
 	sslprivkey  = flag.String("sslprivatekey", "", "SSL Certificate Private Key File")
-	adminToken  = flag.String("admintoken", "", "Security Token to authorize admin actions (list/create/remove users)")
-    container *sqlstore.Container
+	adminToken  = flag.String("admintoken", "", "Security Token to authorize admin actions")
+	container   *sqlstore.Container
 
 	killchannel   = make(map[int](chan bool))
 	userinfocache = cache.New(5*time.Minute, 10*time.Minute)
-	log zerolog.Logger
+	log           zerolog.Logger
 )
 
 func init() {
-
 	flag.Parse()
 
-	if(*logType=="json") {
-        log = zerolog.New(os.Stdout).With().Timestamp().Str("role",filepath.Base(os.Args[0])).Logger()
-    } else {
+	if *logType == "json" {
+		log = zerolog.New(os.Stdout).With().Timestamp().Str("role", filepath.Base(os.Args[0])).Logger()
+	} else {
 		output := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: !*colorOutput}
-        log = zerolog.New(output).With().Timestamp().Str("role",filepath.Base(os.Args[0])).Logger()
-    }
+		log = zerolog.New(output).With().Timestamp().Str("role", filepath.Base(os.Args[0])).Logger()
+	}
 
-    if(*adminToken == "") {
-        if v := os.Getenv("WUZAPI_ADMIN_TOKEN"); v != "" {
-            *adminToken = v
-        }
-    }
+	if *adminToken == "" {
+		if v := os.Getenv("WUZAPI_ADMIN_TOKEN"); v != "" {
+			*adminToken = v
+		}
+	}
+}
 
+func getWritableDbPath() string {
+	// Default path
+	ex, err := os.Executable()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to get executable path")
+		os.Exit(1)
+	}
+	exPath := filepath.Dir(ex)
+	dbPath := filepath.Join(exPath, "dbdata")
+
+	// Try creating the directory
+	if err := os.MkdirAll(dbPath, 0755); err == nil {
+		return dbPath
+	}
+
+	// Fallback to /tmp
+	tmpFallback := filepath.Join(os.TempDir(), "wuzapi-dbdata")
+	log.Warn().Msg("Using fallback path: " + tmpFallback)
+	if err := os.MkdirAll(tmpFallback, 0755); err != nil {
+		log.Fatal().Err(err).Msg("Could not create fallback dbdata directory")
+		os.Exit(1)
+	}
+	return tmpFallback
 }
 
 func main() {
-	// Gunakan direktori sementara (writable) untuk menyimpan database
-	tmpDir := filepath.Join(os.TempDir(), "wuzapi-dbdata")
-	err := os.MkdirAll(tmpDir, 0755)
-	if err != nil {
-		panic("Could not create temp dbdata directory: " + err.Error())
-	}
+	dbDir := getWritableDbPath()
 
-	usersDbPath := filepath.Join(tmpDir, "users.db")
-	mainDbPath := "file:" + filepath.Join(tmpDir, "main.db") + "?_pragma=foreign_keys(1)&_busy_timeout=3000"
+	usersDbPath := filepath.Join(dbDir, "users.db")
+	mainDbPath := "file:" + filepath.Join(dbDir, "main.db") + "?_pragma=foreign_keys(1)&_busy_timeout=3000"
 
-	db, err := sql.Open("sqlite", usersDbPath + "?_pragma=foreign_keys(1)&_busy_timeout=3000")
+	db, err := sql.Open("sqlite", usersDbPath+"?_pragma=foreign_keys(1)&_busy_timeout=3000")
 	if err != nil {
-		log.Fatal().Err(err).Msg("Could not open/create " + usersDbPath)
+		log.Fatal().Err(err).Msg("Could not open/create users.db")
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -90,8 +109,7 @@ func main() {
 		expiration INTEGER,
 		events TEXT NOT NULL default "All"
 	);`
-	_, err = db.Exec(sqlStmt)
-	if err != nil {
+	if _, err := db.Exec(sqlStmt); err != nil {
 		panic(fmt.Sprintf("%q: %s\n", err, sqlStmt))
 	}
 
@@ -108,7 +126,7 @@ func main() {
 	s := &server{
 		router: mux.NewRouter(),
 		db:     db,
-		exPath: tmpDir,
+		exPath: dbDir,
 	}
 	s.routes()
 	s.connectOnStartup()
@@ -128,7 +146,7 @@ func main() {
 	go func() {
 		if *sslcert != "" {
 			if err := srv.ListenAndServeTLS(*sslcert, *sslprivkey); err != nil && err != http.ErrServerClosed {
-				log.Fatal().Err(err).Msg("Startup failed")
+				log.Fatal().Err(err).Msg("Startup failed (TLS)")
 			}
 		} else {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -145,8 +163,9 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Error().Str("error", fmt.Sprintf("%+v", err)).Msg("Server Shutdown Failed")
+		log.Error().Err(err).Msg("Server Shutdown Failed")
 		os.Exit(1)
 	}
+
 	log.Info().Msg("Server Exited Properly")
 }
