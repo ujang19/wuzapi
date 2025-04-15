@@ -62,15 +62,11 @@ func init() {
 
 func getWritableDbPath() string {
 	dbPath := "dbdata"
-
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
-		log.Fatal().Err(err).Msg("Failed to create dbdata directory")
-		os.Exit(1)
+	if err := os.MkdirAll(dbPath, 0755); err == nil {
+		return dbPath
 	}
-	return dbPath
-}
 
-	// Fallback to /tmp
+	// Fallback to /tmp if ./dbdata fails
 	tmpFallback := filepath.Join(os.TempDir(), "wuzapi-dbdata")
 	log.Warn().Msg("Using fallback path: " + tmpFallback)
 	if err := os.MkdirAll(tmpFallback, 0755); err != nil {
