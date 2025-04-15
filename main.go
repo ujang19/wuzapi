@@ -61,19 +61,14 @@ func init() {
 }
 
 func getWritableDbPath() string {
-	// Default path
-	ex, err := os.Executable()
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to get executable path")
+	dbPath := "dbdata"
+
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		log.Fatal().Err(err).Msg("Failed to create dbdata directory")
 		os.Exit(1)
 	}
-	exPath := filepath.Dir(ex)
-	dbPath := filepath.Join(exPath, "dbdata")
-
-	// Try creating the directory
-	if err := os.MkdirAll(dbPath, 0755); err == nil {
-		return dbPath
-	}
+	return dbPath
+}
 
 	// Fallback to /tmp
 	tmpFallback := filepath.Join(os.TempDir(), "wuzapi-dbdata")
