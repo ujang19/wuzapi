@@ -62,40 +62,44 @@ func init() {
 }
 
 func main() {
-
-    ex, err := os.Executable()
-    if err != nil {
-        panic(err)
-    }
-    exPath := filepath.Dir(ex)
-
-    dbDirectory := exPath + "/dbdata"
-	_, err = os.Stat(dbDirectory)
-	if os.IsNotExist(err) {
-		errDir := os.MkdirAll(dbDirectory, 0751)
-		if errDir != nil {
-			panic("Could not create dbdata directory")
-		}
+	// Gunakan direktori sementara (writable) untuk menyimpan database
+	tmpDir := filepath.Join(os.TempDir(), "wuzapi-dbdata")
+	err := os.MkdirAll(tmpDir, 0755)
+	if err != nil {
+		panic("Could not create temp dbdata directory: " + err.Error())
 	}
 
-    db, err := sql.Open("sqlite", exPath + "/dbdata/users.db?_pragma=foreign_keys(1)&_busy_timeout=3000")
+	usersDbPath := filepath.Join(tmpDir, "users.db")
+	mainDbPath := "file:" + filepath.Join(tmpDir, "main.db") + "?_pragma=foreign_keys(1)&_busy_timeout=3000"
+
+	db, err := sql.Open("sqlite", usersDbPath + "?_pragma=foreign_keys(1)&_busy_timeout=3000")
 	if err != nil {
-		log.Fatal().Err(err).Msg("Could not open/create "+exPath+"/dbdata/users.db")
+		log.Fatal().Err(err).Msg("Could not open/create " + usersDbPath)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	sqlStmt := `CREATE TABLE IF NOT EXISTS users (id INTEGER NOT NULL PRIMARY KEY, name TEXT NOT NULL, token TEXT NOT NULL, webhook TEXT NOT NULL default "", jid TEXT NOT NULL default "", qrcode TEXT NOT NULL default "", connected INTEGER, expiration INTEGER, events TEXT NOT NULL default "All");`
+	sqlStmt := `CREATE TABLE IF NOT EXISTS users (
+		id INTEGER NOT NULL PRIMARY KEY,
+		name TEXT NOT NULL,
+		token TEXT NOT NULL,
+		webhook TEXT NOT NULL default "",
+		jid TEXT NOT NULL default "",
+		qrcode TEXT NOT NULL default "",
+		connected INTEGER,
+		expiration INTEGER,
+		events TEXT NOT NULL default "All"
+	);`
 	_, err = db.Exec(sqlStmt)
 	if err != nil {
 		panic(fmt.Sprintf("%q: %s\n", err, sqlStmt))
 	}
 
-	if(*waDebug!="") {
+	if *waDebug != "" {
 		dbLog := waLog.Stdout("Database", *waDebug, *colorOutput)
-        container, err = sqlstore.New("sqlite", "file:"+exPath+"/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=3000", dbLog)
+		container, err = sqlstore.New("sqlite", mainDbPath, dbLog)
 	} else {
-        container, err = sqlstore.New("sqlite", "file:"+exPath+"/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=3000", nil)
+		container, err = sqlstore.New("sqlite", mainDbPath, nil)
 	}
 	if err != nil {
 		panic(err)
@@ -104,19 +108,18 @@ func main() {
 	s := &server{
 		router: mux.NewRouter(),
 		db:     db,
-		exPath: exPath,
+		exPath: tmpDir,
 	}
 	s.routes()
-
 	s.connectOnStartup()
 
 	srv := &http.Server{
-		Addr:    *address + ":" + *port,
-		Handler: s.router,
+		Addr:              *address + ":" + *port,
+		Handler:           s.router,
 		ReadHeaderTimeout: 20 * time.Second,
-		ReadTimeout:	   60 * time.Second,
-		WriteTimeout:	  120 * time.Second,
-		IdleTimeout:	   180 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       180 * time.Second,
 	}
 
 	done := make(chan os.Signal, 1)
@@ -125,30 +128,24 @@ func main() {
 	go func() {
 		if *sslcert != "" {
 			if err := srv.ListenAndServeTLS(*sslcert, *sslprivkey); err != nil && err != http.ErrServerClosed {
-				//log.Fatalf("listen: %s\n", err)
-                log.Fatal().Err(err).Msg("Startup failed")
+				log.Fatal().Err(err).Msg("Startup failed")
 			}
 		} else {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				//log.Fatalf("listen: %s\n", err)
-                log.Fatal().Err(err).Msg("Startup failed")
+				log.Fatal().Err(err).Msg("Startup failed")
 			}
 		}
 	}()
-    //wlog.Infof("Server Started. Listening on %s:%s", *address, *port)
-    log.Info().Str("address", *address).Str("port",*port).Msg("Server Started")
 
+	log.Info().Str("address", *address).Str("port", *port).Msg("Server Started")
 	<-done
-	log.Info().Msg("Server Stoped")
+	log.Info().Msg("Server Stopped")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer func() {
-		// extra handling here
-		cancel()
-	}()
+	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Error().Str("error",fmt.Sprintf("%+v",err)).Msg("Server Shutdown Failed")
+		log.Error().Str("error", fmt.Sprintf("%+v", err)).Msg("Server Shutdown Failed")
 		os.Exit(1)
 	}
 	log.Info().Msg("Server Exited Properly")
